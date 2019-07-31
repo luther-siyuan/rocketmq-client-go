@@ -61,6 +61,7 @@ func TestUpdateTopicRouteInfo(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(updatedRouteData, ShouldResemble, remoteRouteData)
 		})
+
 		Convey("updatedRouteData should be deep equal localRouteData", func() {
 			localRouteData, exist := routeDataMap.Load(topic)
 			So(exist, ShouldBeTrue)

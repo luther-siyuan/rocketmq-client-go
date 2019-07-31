@@ -19,27 +19,58 @@ package internal
 
 import (
 	"context"
+	"github.com/apache/rocketmq-client-go/internal/remote"
+	. "github.com/smartystreets/goconvey/convey"
 	"testing"
 )
 
-func TestRMQClient_PullMessage(t *testing.T) {
-	client := GetOrNewRocketMQClient(ClientOptions{})
-	req := &PullMessageRequest{
-		ConsumerGroup:  "testGroup",
-		Topic:          "wenfeng",
-		QueueId:        0,
-		QueueOffset:    0,
-		MaxMsgNums:     32,
-		SysFlag:        0x1 << 2,
-		SubExpression:  "*",
-		ExpressionType: "TAG",
-	}
-	res, err := client.PullMessage(context.Background(), "127.0.0.1:10911", req)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
+const (
+	testTopic  = "TestTopic"
+	testGroup = "TestGroup"
+)
 
-	for _, a := range res.GetMessageExts() {
-		t.Log(string(a.Body))
-	}
+var defaultOptions = ClientOptions{
+	GroupName:       testGroup,
+	NameServerAddrs: []string{"127.0.0.1:9876"},
+	ClientIP:        "127.0.0.1",
+	InstanceName:    "siYuan",
+}
+
+func TestPullMessage(t *testing.T) {
+	Convey("Given a starting client", t, func() {
+		client := GetOrNewRocketMQClient(defaultOptions)
+		req := &PullMessageRequest{
+			ConsumerGroup:  "please_rename_unique_group_name_4",
+			Topic:          testTopic,
+			QueueId:        0,
+			QueueOffset:    0,
+			MaxMsgNums:     32,
+			SysFlag:        0x1 << 2,
+			SubExpression:  "*",
+			ExpressionType: "TAG",
+		}
+		_, err := client.PullMessage(context.Background(), "127.0.0.1:10911", req)
+		So(err, ShouldBeNil)
+	})
+}
+
+func TestGetOrNewRocketMQClient(t *testing.T) {
+	Convey("Given a starting client", t, func() {
+		client := &rmqClient{
+			option:       defaultOptions,
+			remoteClient: remote.NewRemotingClient(),
+		}
+		rmqClient := GetOrNewRocketMQClient(defaultOptions)
+
+		Convey("client from clientMap should not be nil", func() {
+			expectedClient, ok := clientMap.Load(client.ClientID())
+			So(ok, ShouldBeTrue)
+			So(expectedClient, ShouldNotBeNil)
+		})
+
+		Convey("processor ReqNotifyConsumerIdsChanged have been registered", func() {
+			So(rmqClient.remoteClient, ShouldNotEqual, client)
+			t.Logf("rmqClient: %+v", rmqClient)
+		})
+	})
 }
