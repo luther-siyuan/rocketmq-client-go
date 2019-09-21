@@ -115,11 +115,15 @@ func TestSync(t *testing.T) {
 
 	ctx := context.Background()
 	msg := &primitive.Message{
-		Topic:      topic,
-		Body:       []byte("this is a message body"),
-		Properties: map[string]string{"key": "value"},
-		QueueID:    0,
+		Topic: topic,
+		Body:  []byte("this is a message body"),
+		Queue: &primitive.MessageQueue{
+			Topic:      topic,
+			BrokerName: "aa",
+			QueueId:    0,
+		},
 	}
+	msg.WithProperty("key", "value")
 
 	expectedResp := &primitive.SendResult{
 		Status:      primitive.SendOK,
@@ -162,10 +166,15 @@ func TestASync(t *testing.T) {
 
 	ctx := context.Background()
 	msg := &primitive.Message{
-		Topic:      topic,
-		Body:       []byte("this is a message body"),
-		Properties: map[string]string{"key": "value"},
+		Topic: topic,
+		Body:  []byte("this is a message body"),
+		Queue: &primitive.MessageQueue{
+			Topic:      topic,
+			BrokerName: "aa",
+			QueueId:    0,
+		},
 	}
+	msg.WithProperty("key", "value")
 
 	expectedResp := &primitive.SendResult{
 		Status:      primitive.SendOK,
@@ -219,10 +228,15 @@ func TestOneway(t *testing.T) {
 
 	ctx := context.Background()
 	msg := &primitive.Message{
-		Topic:      topic,
-		Body:       []byte("this is a message body"),
-		Properties: map[string]string{"key": "value"},
+		Topic: topic,
+		Body:  []byte("this is a message body"),
+		Queue: &primitive.MessageQueue{
+			Topic:      topic,
+			BrokerName: "aa",
+			QueueId:    0,
+		},
 	}
+	msg.WithProperty("key", "value")
 
 	mockB4Send(p)
 
