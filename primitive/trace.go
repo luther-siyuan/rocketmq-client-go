@@ -15,28 +15,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+package primitive
 
-import (
-	"bytes"
-	"compress/zlib"
-	"io/ioutil"
-	"net"
-)
-
-func GetAddressByBytes(data []byte) string {
-	return net.IPv4(data[0], data[1], data[2], data[3]).String()
-}
-
-func UnCompress(data []byte) []byte {
-	rdata := bytes.NewReader(data)
-	r, err := zlib.NewReader(rdata)
-	if err != nil {
-		return data
-	}
-	retData, err := ioutil.ReadAll(r)
-	if err != nil {
-		return data
-	}
-	return retData
+// config for message trace.
+type TraceConfig struct {
+	TraceTopic   string
+	Access       AccessChannel
+	NamesrvAddrs []string
+	Credentials  // acl config for trace. omit if acl is closed on broker.
 }
