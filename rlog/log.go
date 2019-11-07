@@ -33,6 +33,7 @@ const (
 )
 
 type Logger interface {
+	SetLevel(l logrus.Level)
 	Debug(msg string, fields map[string]interface{})
 	Info(msg string, fields map[string]interface{})
 	Warning(msg string, fields map[string]interface{})
@@ -41,47 +42,56 @@ type Logger interface {
 }
 
 func init() {
-	r := &defaultLogger{
+	r := &DefaultLogger{
 		logger: logrus.New(),
 	}
+	r.logger.SetLevel(logrus.InfoLevel)
 	rLog = r
 }
 
-var rLog *defaultLogger
+var rLog *DefaultLogger
 
-type defaultLogger struct {
+type DefaultLogger struct {
 	logger *logrus.Logger
 }
 
-func (l *defaultLogger) Debug(msg string, fields map[string]interface{}) {
+func (l *DefaultLogger) SetLogger(log *DefaultLogger) {
+	rLog = log
+}
+
+func (l *DefaultLogger) SetLevel(level logrus.Level) {
+	rLog.logger.SetLevel(level)
+}
+
+func (l *DefaultLogger) Debug(msg string, fields map[string]interface{}) {
 	if msg == "" && len(fields) == 0 {
 		return
 	}
 	rLog.logger.WithFields(fields).Debug(msg)
 }
 
-func (l *defaultLogger) Info(msg string, fields map[string]interface{}) {
+func (l *DefaultLogger) Info(msg string, fields map[string]interface{}) {
 	if msg == "" && len(fields) == 0 {
 		return
 	}
 	rLog.logger.WithFields(fields).Info(msg)
 }
 
-func (l *defaultLogger) Warning(msg string, fields map[string]interface{}) {
+func (l *DefaultLogger) Warning(msg string, fields map[string]interface{}) {
 	if msg == "" && len(fields) == 0 {
 		return
 	}
 	rLog.logger.WithFields(fields).Warning(msg)
 }
 
-func (l *defaultLogger) Error(msg string, fields map[string]interface{}) {
+func (l *DefaultLogger) Error(msg string, fields map[string]interface{}) {
 	if msg == "" && len(fields) == 0 {
 		return
 	}
 	rLog.logger.WithFields(fields).WithFields(fields).Error(msg)
 }
 
-func (l *defaultLogger) Fatal(msg string, fields map[string]interface{}) {
+func (l *DefaultLogger) Fatal(msg string, fields map[string]interface{}) {
 	if msg == "" && len(fields) == 0 {
 		return
 	}
