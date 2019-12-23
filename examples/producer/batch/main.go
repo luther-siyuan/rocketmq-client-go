@@ -21,7 +21,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
+	"strconv"
 
 	"github.com/apache/rocketmq-client-go"
 	"github.com/apache/rocketmq-client-go/primitive"
@@ -29,34 +29,28 @@ import (
 )
 
 func main() {
-	namesrvs := []string{"127.0.0.1:9876"}
-	traceCfg := &primitive.TraceConfig{
-		Access:       primitive.Local,
-		NamesrvAddrs: namesrvs,
-	}
-
 	p, _ := rocketmq.NewProducer(
-		producer.WithNameServer(namesrvs),
+		producer.WithNameServer([]string{"127.0.0.1:9876"}),
 		producer.WithRetry(2),
-		producer.WithTrace(traceCfg))
+	)
 	err := p.Start()
 	if err != nil {
 		fmt.Printf("start producer error: %s", err.Error())
 		os.Exit(1)
 	}
-	for i := 0; i < 1; i++ {
-		res, err := p.SendSync(context.Background(), primitive.NewMessage("test",
-			[]byte("Hello RocketMQ Go Client!")))
-
-		if err != nil {
-			fmt.Printf("send message error: %s\n", err)
-		} else {
-			fmt.Printf("send message success: result=%s\n", res.String())
-		}
+	var msgs []*primitive.Message
+	for i := 0; i < 10; i++ {
+		msgs = append(msgs, primitive.NewMessage("test",
+			[]byte("Hello RocketMQ Go Client! num: "+strconv.Itoa(i))))
 	}
 
-	time.Sleep(10 * time.Second)
+	res, err := p.SendSync(context.Background(), msgs...)
 
+	if err != nil {
+		fmt.Printf("send message error: %s\n", err)
+	} else {
+		fmt.Printf("send message success: result=%s\n", res.String())
+	}
 	err = p.Shutdown()
 	if err != nil {
 		fmt.Printf("shutdown producer error: %s", err.Error())

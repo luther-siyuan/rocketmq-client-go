@@ -67,12 +67,18 @@ type Message struct {
 	Flag          int32
 	TransactionId string
 	Batch         bool
-	// QueueID is the queue that messages will be sent to. the value must be set if want to custom the queue of message,
+	// Queue is the queue that messages will be sent to. the value must be set if want to custom the queue of message,
 	// just ignore if not.
 	Queue *MessageQueue
 
 	properties map[string]string
 	mutex      sync.RWMutex
+}
+
+func (m *Message) WithProperties(p map[string]string) {
+	m.mutex.Lock()
+	m.properties = p
+	m.mutex.Unlock()
 }
 
 func (m *Message) WithProperty(key, value string) {
@@ -133,6 +139,16 @@ func (m *Message) UnmarshalProperties(data []byte) {
 	}
 }
 
+func (m *Message) GetProperties() map[string]string {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	result := make(map[string]string, len(m.properties))
+	for k, v := range m.properties {
+		result[k] = v
+	}
+	return result
+}
+
 func NewMessage(topic string, body []byte) *Message {
 	msg := &Message{
 		Topic:      topic,
@@ -189,10 +205,38 @@ func (m *Message) String() string {
 		m.Topic, string(m.Body), m.Flag, m.properties, m.TransactionId)
 }
 
+func (m *Message) Marshal() []byte {
+	// storeSize all size of message info.
+	// TOTALSIZE  MAGICCOD BODYCRC FLAG BODYSIZE BODY PROPERTYSIZE PROPERTY
+	v := m.MarshallProperties()
+	properties := []byte(v)
+	storeSize := 4 + 4 + 4 + 4 + 4 + len(m.Body) + 2 + len(properties)
+
+	buffer := make([]byte, storeSize)
+	pos := 0
+	binary.BigEndian.PutUint32(buffer[pos:], uint32(storeSize)) // 1. TOTALSIZE
+	pos += 4
+	binary.BigEndian.PutUint32(buffer[pos:], 0) // 2. MAGICCODE
+	pos += 4
+	binary.BigEndian.PutUint32(buffer[pos:], 0) // 3. BODYCRC
+	pos += 4
+	binary.BigEndian.PutUint32(buffer[pos:], uint32(m.Flag)) // 4. FLAG
+	pos += 4
+	binary.BigEndian.PutUint32(buffer[pos:], uint32(len(m.Body))) // 5. BODYSIZE
+	pos += 4
+	copy(buffer[pos:], m.Body)
+	pos += len(m.Body)
+
+	binary.BigEndian.PutUint16(buffer[pos:], uint16(len(properties))) // 7. PROPERTYSIZE
+	pos += 2
+	copy(buffer[pos:], properties)
+
+	return buffer
+}
+
 type MessageExt struct {
 	Message
 	MsgId                     string
-	QueueId                   int32
 	StoreSize                 int32
 	QueueOffset               int64
 	SysFlag                   int32
@@ -221,7 +265,7 @@ func (msgExt *MessageExt) IsTraceOn() string {
 func (msgExt *MessageExt) String() string {
 	return fmt.Sprintf("[Message=%s, MsgId=%s, QueueId=%d, StoreSize=%d, QueueOffset=%d, SysFlag=%d, "+
 		"BornTimestamp=%d, BornHost=%s, StoreTimestamp=%d, StoreHost=%s, CommitLogOffset=%d, BodyCRC=%d, "+
-		"ReconsumeTimes=%d, PreparedTransactionOffset=%d]", msgExt.Message.String(), msgExt.MsgId, msgExt.QueueId,
+		"ReconsumeTimes=%d, PreparedTransactionOffset=%d]", msgExt.Message.String(), msgExt.MsgId, msgExt.Queue.QueueId,
 		msgExt.StoreSize, msgExt.QueueOffset, msgExt.SysFlag, msgExt.BornTimestamp, msgExt.BornHost,
 		msgExt.StoreTimestamp, msgExt.StoreHost, msgExt.CommitLogOffset, msgExt.BodyCRC, msgExt.ReconsumeTimes,
 		msgExt.PreparedTransactionOffset)
@@ -233,6 +277,7 @@ func DecodeMessage(data []byte) []*MessageExt {
 	count := 0
 	for count < len(data) {
 		msg := &MessageExt{}
+		msg.Queue = &MessageQueue{}
 
 		// 1. total size
 		binary.Read(buf, binary.BigEndian, &msg.StoreSize)
@@ -247,7 +292,9 @@ func DecodeMessage(data []byte) []*MessageExt {
 		count += 4
 
 		// 4. queueID
-		binary.Read(buf, binary.BigEndian, &msg.QueueId)
+		var qId int32
+		binary.Read(buf, binary.BigEndian, &qId)
+		msg.Queue.QueueId = int(qId)
 		count += 4
 
 		// 5. Flag
@@ -346,11 +393,6 @@ func (mq *MessageQueue) HashCode() int {
 	result = 31*result + utils.HashString(mq.Topic)
 
 	return result
-}
-
-func (mq MessageQueue) Equals(queue *MessageQueue) bool {
-	// TODO
-	return mq.BrokerName == queue.BrokerName && mq.Topic == queue.Topic && mq.QueueId == mq.QueueId
 }
 
 type AccessChannel int

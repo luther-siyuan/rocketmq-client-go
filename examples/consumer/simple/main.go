@@ -35,7 +35,10 @@ func main() {
 	)
 	err := c.Subscribe("test", consumer.MessageSelector{}, func(ctx context.Context,
 		msgs ...*primitive.MessageExt) (consumer.ConsumeResult, error) {
-		fmt.Printf("subscribe callback: %v \n", msgs)
+		for i := range msgs {
+			fmt.Printf("subscribe callback: %v \n", msgs[i])
+		}
+
 		return consumer.ConsumeSuccess, nil
 	})
 	if err != nil {
@@ -50,6 +53,6 @@ func main() {
 	time.Sleep(time.Hour)
 	err = c.Shutdown()
 	if err != nil {
-		fmt.Printf("shundown Consumer error: %s", err.Error())
+		fmt.Printf("shutdown Consumer error: %s", err.Error())
 	}
 }

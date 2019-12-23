@@ -98,6 +98,7 @@ func DefaultClientOptions() ClientOptions {
 type ClientOptions struct {
 	GroupName         string
 	NameServerAddrs   primitive.NamesrvAddr
+	NameServerDomain  string
 	Namesrv           *namesrvs
 	ClientIP          string
 	InstanceName      string
@@ -164,6 +165,7 @@ type rmqClient struct {
 	remoteClient remote.RemotingClient
 	hbMutex      sync.Mutex
 	close        bool
+	rbMutex      sync.Mutex
 	namesrvs     *namesrvs
 	done         chan struct{}
 	shutdownOnce sync.Once
@@ -258,8 +260,26 @@ func (c *rmqClient) Start() {
 		if !c.option.Credentials.IsEmpty() {
 			c.remoteClient.RegisterInterceptor(remote.ACLInterceptor(c.option.Credentials))
 		}
-		// TODO fetchNameServerAddr
-		go func() {}()
+		// fetchNameServerAddr
+		if len(c.option.NameServerAddrs) == 0 {
+			go func() {
+				// delay
+				ticker := time.NewTicker(60 * 2 * time.Second)
+				defer ticker.Stop()
+				time.Sleep(50 * time.Millisecond)
+				for {
+					select {
+					case <-ticker.C:
+						c.namesrvs.UpdateNameServerAddress(c.option.NameServerDomain, c.option.InstanceName)
+					case <-c.done:
+						rlog.Info("The RMQClient stopping update name server domain info.", map[string]interface{}{
+							"clientID": c.ClientID(),
+						})
+						return
+					}
+				}
+			}()
+		}
 
 		// schedule update route info
 		go func() {
@@ -432,15 +452,7 @@ func (c *rmqClient) SendHeartbeatToAllBrokerWithLock() {
 				return true
 			}
 			if response.Code == ResSuccess {
-				v, exist := c.namesrvs.brokerVersionMap.Load(brokerName)
-				var m map[string]int32
-				if exist {
-					m = v.(map[string]int32)
-				} else {
-					m = make(map[string]int32, 4)
-					c.namesrvs.brokerVersionMap.Store(brokerName, m)
-				}
-				m[brokerName] = int32(response.Version)
+				c.namesrvs.AddBrokerVersion(brokerName, addr, int32(response.Version))
 				rlog.Debug("send heart beat to broker success", map[string]interface{}{
 					"brokerName": brokerName,
 					"brokerId":   id,
@@ -618,6 +630,8 @@ func (c *rmqClient) SelectConsumer(group string) InnerConsumer {
 }
 
 func (c *rmqClient) RebalanceImmediately() {
+	c.rbMutex.Lock()
+	defer c.rbMutex.Unlock()
 	c.consumerMap.Range(func(key, value interface{}) bool {
 		consumer := value.(InnerConsumer)
 		consumer.Rebalance()

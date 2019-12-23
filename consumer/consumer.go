@@ -271,7 +271,9 @@ type defaultConsumer struct {
 }
 
 func (dc *defaultConsumer) start() error {
-
+	if len(dc.option.NameServerAddrs) == 0 {
+		dc.namesrv.UpdateNameServerAddress(dc.option.NameServerDomain, dc.option.InstanceName)
+	}
 	if dc.model == Clustering {
 		// set retry topic
 		retryTopic := internal.GetRetryTopic(dc.consumerGroup)
@@ -341,13 +343,7 @@ func (dc *defaultConsumer) subscriptionAutomatically(topic string) {
 
 func (dc *defaultConsumer) updateTopicSubscribeInfo(topic string, mqs []*primitive.MessageQueue) {
 	_, exist := dc.subscriptionDataTable.Load(topic)
-	// does subscribe, if true, replace it
 	if exist {
-		mqSet := make(map[int]*primitive.MessageQueue, 0)
-		for idx := range mqs {
-			mq := mqs[idx]
-			mqSet[mq.HashCode()] = mq
-		}
 		dc.topicSubscribeInfoTable.Store(topic, mqs)
 	}
 }
@@ -469,10 +465,10 @@ func (dc *defaultConsumer) lock(mq *primitive.MessageQueue) bool {
 		if exist {
 			pq := v.(*processQueue)
 			pq.WithLock(true)
-			pq.lastConsumeTime = time.Now()
-			pq.lastLockTime = time.Now()
+			pq.UpdateLastConsumeTime()
+			pq.UpdateLastLockTime()
 		}
-		if _mq.Equals(mq) {
+		if _mq == *mq {
 			lockOK = true
 		}
 	}
@@ -532,7 +528,7 @@ func (dc *defaultConsumer) lockAll() {
 			if exist {
 				pq := v.(*processQueue)
 				pq.WithLock(true)
-				pq.lastConsumeTime = time.Now()
+				pq.UpdateLastConsumeTime()
 			}
 			set[_mq] = true
 		}
@@ -543,7 +539,7 @@ func (dc *defaultConsumer) lockAll() {
 				if exist {
 					pq := v.(*processQueue)
 					pq.WithLock(false)
-					pq.lastLockTime = time.Now()
+					pq.UpdateLastLockTime()
 					rlog.Info("lock MessageQueue", map[string]interface{}{
 						"lockOK":                 false,
 						rlog.LogKeyConsumerGroup: dc.consumerGroup,
@@ -653,14 +649,12 @@ func (dc *defaultConsumer) buildProcessQueueTableByBrokerName() map[string][]*pr
 	return result
 }
 
-// TODO 问题不少 需要再好好对一下
 func (dc *defaultConsumer) updateProcessQueueTable(topic string, mqs []*primitive.MessageQueue) bool {
 	var changed bool
 	mqSet := make(map[primitive.MessageQueue]bool)
 	for idx := range mqs {
 		mqSet[*mqs[idx]] = true
 	}
-	// TODO
 	dc.processQueueTable.Range(func(key, value interface{}) bool {
 		mq := key.(primitive.MessageQueue)
 		pq := value.(*processQueue)
@@ -1060,11 +1054,11 @@ var (
 )
 
 func updatePullFromWhichNode(mq *primitive.MessageQueue, brokerId int64) {
-	pullFromWhichNodeTable.Store(mq.HashCode(), brokerId)
+	pullFromWhichNodeTable.Store(*mq, brokerId)
 }
 
 func recalculatePullFromWhichNode(mq *primitive.MessageQueue) int64 {
-	v, exist := pullFromWhichNodeTable.Load(mq.HashCode())
+	v, exist := pullFromWhichNodeTable.Load(*mq)
 	if exist {
 		return v.(int64)
 	}
