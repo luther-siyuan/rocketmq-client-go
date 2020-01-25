@@ -15,4 +15,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+package primitive
+
+import (
+	"sync"
+)
+
+var headerPool = sync.Pool{}
+
+func init() {
+	headerPool.New = func() interface{} {
+		return make([]byte, 4)
+	}
+}
+
+func GetHeader() []byte {
+	d := headerPool.Get().([]byte)
+	//d = (d)[:0]
+	return d
+}
+
+func BackHeader(d []byte) {
+	headerPool.Put(d)
+}

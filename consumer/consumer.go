@@ -19,7 +19,6 @@ package consumer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -28,14 +27,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/json-iterator/go"
 	"github.com/pkg/errors"
 	"github.com/tidwall/gjson"
 
-	"github.com/apache/rocketmq-client-go/internal"
-	"github.com/apache/rocketmq-client-go/internal/remote"
-	"github.com/apache/rocketmq-client-go/internal/utils"
-	"github.com/apache/rocketmq-client-go/primitive"
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/internal"
+	"github.com/apache/rocketmq-client-go/v2/internal/remote"
+	"github.com/apache/rocketmq-client-go/v2/internal/utils"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 const (
@@ -61,8 +61,8 @@ const (
 type ConsumeType string
 
 const (
-	_PullConsume = ConsumeType("pull")
-	_PushConsume = ConsumeType("push")
+	_PullConsume = ConsumeType("CONSUME_ACTIVELY")
+	_PushConsume = ConsumeType("CONSUME_PASSIVELY")
 
 	_SubAll = "*"
 )
@@ -268,6 +268,8 @@ type defaultConsumer struct {
 	prCh chan PullRequest
 
 	namesrv internal.Namesrvs
+
+	pullFromWhichNodeTable sync.Map
 }
 
 func (dc *defaultConsumer) start() error {
@@ -583,7 +585,7 @@ func (dc *defaultConsumer) unlockAll(oneway bool) {
 }
 
 func (dc *defaultConsumer) doLock(addr string, body *lockBatchRequestBody) []primitive.MessageQueue {
-	data, _ := json.Marshal(body)
+	data, _ := jsoniter.Marshal(body)
 	request := remote.NewRemotingCommand(internal.ReqLockBatchMQ, nil, data)
 	response, err := dc.client.InvokeSync(context.Background(), addr, request, 1*time.Second)
 	if err != nil {
@@ -599,7 +601,7 @@ func (dc *defaultConsumer) doLock(addr string, body *lockBatchRequestBody) []pri
 	if len(response.Body) == 0 {
 		return nil
 	}
-	err = json.Unmarshal(response.Body, &lockOKMQSet)
+	err = jsoniter.Unmarshal(response.Body, &lockOKMQSet)
 	if err != nil {
 		rlog.Error("Unmarshal lock mq body error", map[string]interface{}{
 			rlog.LogKeyUnderlayError: err,
@@ -610,7 +612,7 @@ func (dc *defaultConsumer) doLock(addr string, body *lockBatchRequestBody) []pri
 }
 
 func (dc *defaultConsumer) doUnlock(addr string, body *lockBatchRequestBody, oneway bool) {
-	data, _ := json.Marshal(body)
+	data, _ := jsoniter.Marshal(body)
 	request := remote.NewRemotingCommand(internal.ReqUnlockBatchMQ, nil, data)
 	if oneway {
 		err := dc.client.InvokeOneWay(context.Background(), addr, request, 3*time.Second)
@@ -855,7 +857,7 @@ func (dc *defaultConsumer) pullInner(ctx context.Context, queue *primitive.Messa
 
 func (dc *defaultConsumer) processPullResult(mq *primitive.MessageQueue, result *primitive.PullResult, data *internal.SubscriptionData) {
 
-	updatePullFromWhichNode(mq, result.SuggestWhichBrokerId)
+	dc.updatePullFromWhichNode(mq, result.SuggestWhichBrokerId)
 
 	switch result.Status {
 	case primitive.PullFound:
@@ -1041,24 +1043,20 @@ func clearCommitOffsetFlag(sysFlag int32) int32 {
 }
 
 func (dc *defaultConsumer) tryFindBroker(mq *primitive.MessageQueue) *internal.FindBrokerResult {
-	result := dc.namesrv.FindBrokerAddressInSubscribe(mq.BrokerName, recalculatePullFromWhichNode(mq), false)
+	result := dc.namesrv.FindBrokerAddressInSubscribe(mq.BrokerName, dc.recalculatePullFromWhichNode(mq), false)
 	if result != nil {
 		return result
 	}
 	dc.namesrv.UpdateTopicRouteInfo(mq.Topic)
-	return dc.namesrv.FindBrokerAddressInSubscribe(mq.BrokerName, recalculatePullFromWhichNode(mq), false)
+	return dc.namesrv.FindBrokerAddressInSubscribe(mq.BrokerName, dc.recalculatePullFromWhichNode(mq), false)
 }
 
-var (
-	pullFromWhichNodeTable sync.Map
-)
-
-func updatePullFromWhichNode(mq *primitive.MessageQueue, brokerId int64) {
-	pullFromWhichNodeTable.Store(*mq, brokerId)
+func (dc *defaultConsumer) updatePullFromWhichNode(mq *primitive.MessageQueue, brokerId int64) {
+	dc.pullFromWhichNodeTable.Store(*mq, brokerId)
 }
 
-func recalculatePullFromWhichNode(mq *primitive.MessageQueue) int64 {
-	v, exist := pullFromWhichNodeTable.Load(*mq)
+func (dc *defaultConsumer) recalculatePullFromWhichNode(mq *primitive.MessageQueue) int64 {
+	v, exist := dc.pullFromWhichNodeTable.Load(*mq)
 	if exist {
 		return v.(int64)
 	}

@@ -20,8 +20,8 @@ package consumer
 import (
 	"time"
 
-	"github.com/apache/rocketmq-client-go/internal"
-	"github.com/apache/rocketmq-client-go/primitive"
+	"github.com/apache/rocketmq-client-go/v2/internal"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
 )
 
 type consumerOptions struct {
@@ -231,5 +231,35 @@ func WithMaxReconsumeTimes(times int32) Option {
 func WithStrategy(strategy AllocateStrategy) Option {
 	return func(opts *consumerOptions) {
 		opts.Strategy = strategy
+	}
+}
+
+func WithPullBatchSize(batchSize int32) Option {
+	return func(options *consumerOptions) {
+		options.PullBatchSize = batchSize
+	}
+}
+
+func WithRebalanceLockInterval(interval time.Duration) Option {
+	return func(options *consumerOptions) {
+		options.RebalanceLockInterval = interval
+	}
+}
+
+func WithAutoCommit(auto bool) Option {
+	return func(options *consumerOptions) {
+		options.AutoCommit = auto
+	}
+}
+
+func WithSuspendCurrentQueueTimeMillis(suspendT time.Duration) Option {
+	return func(options *consumerOptions) {
+		options.SuspendCurrentQueueTimeMillis = suspendT
+	}
+}
+
+func WithPullInterval(interval time.Duration) Option {
+	return func(options *consumerOptions) {
+		options.PullInterval = interval
 	}
 }

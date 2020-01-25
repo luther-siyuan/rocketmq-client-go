@@ -20,14 +20,13 @@ package producer
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/apache/rocketmq-client-go/internal"
-	"github.com/apache/rocketmq-client-go/internal/remote"
-	"github.com/apache/rocketmq-client-go/primitive"
+	"github.com/apache/rocketmq-client-go/v2/internal"
+	"github.com/apache/rocketmq-client-go/v2/internal/remote"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
 )
 
 const (
@@ -52,6 +51,7 @@ func TestShutdown(t *testing.T) {
 	assert.Nil(t, err)
 
 	client.EXPECT().Shutdown().Return()
+	client.EXPECT().UnregisterProducer(gomock.Any()).Return()
 	err = p.Shutdown()
 	assert.Nil(t, err)
 
@@ -190,9 +190,9 @@ func TestASync(t *testing.T) {
 
 	mockB4Send(p)
 
-	client.EXPECT().InvokeAsync(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+	client.EXPECT().InvokeAsync(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(ctx context.Context, addr string, request *remote.RemotingCommand,
-			timeoutMillis time.Duration, f func(*remote.RemotingCommand, error)) error {
+			f func(*remote.RemotingCommand, error)) error {
 			// mock invoke callback
 			f(nil, nil)
 			return nil

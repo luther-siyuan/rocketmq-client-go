@@ -20,7 +20,7 @@ package internal
 import (
 	"regexp"
 
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 const (
@@ -36,10 +36,6 @@ func ValidateGroup(group string) {
 	if group == "" {
 		rlog.Fatal("consumerGroup is empty", nil)
 	}
-
-	//if !_Pattern.Match([]byte(group)) {
-	//	rlog.Fatalf("the specified group[%s] contains illegal characters, allowing only %s", group, _ValidPattern)
-	//}
 
 	if len(group) > _CharacterMaxLength {
 		rlog.Fatal("the specified group is longer than group max length 255.", nil)

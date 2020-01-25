@@ -19,7 +19,6 @@ package consumer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,11 +26,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/rocketmq-client-go/internal"
-	"github.com/apache/rocketmq-client-go/internal/remote"
-	"github.com/apache/rocketmq-client-go/internal/utils"
-	"github.com/apache/rocketmq-client-go/primitive"
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/json-iterator/go"
+
+	"github.com/apache/rocketmq-client-go/v2/internal"
+	"github.com/apache/rocketmq-client-go/v2/internal/remote"
+	"github.com/apache/rocketmq-client-go/v2/internal/utils"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 type readType int
@@ -52,7 +53,7 @@ func init() {
 	}
 }
 
-//go:generate mockgen -source offset_store.go -destination mock_offset_store.go -self_package github.com/apache/rocketmq-client-go/consumer  --package consumer OffsetStore
+//go:generate mockgen -source offset_store.go -destination mock_offset_store.go -self_package github.com/apache/rocketmq-client-go/v2/consumer  --package consumer OffsetStore
 type OffsetStore interface {
 	persist(mqs []*primitive.MessageQueue)
 	remove(mq *primitive.MessageQueue)
@@ -76,7 +77,7 @@ func (mq MessageQueueKey) MarshalText() (text []byte, err error) {
 		BrokerName: mq.BrokerName,
 		QueueId:    mq.QueueId,
 	}
-	text, err = json.Marshal(repr)
+	text, err = jsoniter.Marshal(repr)
 	return
 }
 
@@ -86,7 +87,7 @@ func (mq *MessageQueueKey) UnmarshalText(text []byte) error {
 		BrokerName string `json:"brokerName"`
 		QueueId    int    `json:"queueId"`
 	}{}
-	err := json.Unmarshal(text, &repr)
+	err := jsoniter.Unmarshal(text, &repr)
 	if err != nil {
 		return err
 	}
@@ -140,7 +141,7 @@ func (local *localFileOffsetStore) load() {
 		OffsetTable: datas,
 	}
 
-	err = json.Unmarshal(data, &wrapper)
+	err = jsoniter.Unmarshal(data, &wrapper)
 	if err != nil {
 		rlog.Warning("unmarshal local offset error", map[string]interface{}{
 			"local_path":             local.path,
@@ -204,7 +205,7 @@ func (local *localFileOffsetStore) persist(mqs []*primitive.MessageQueue) {
 		OffsetTable: local.OffsetTable,
 	}
 
-	data, _ := json.Marshal(wrapper)
+	data, _ := jsoniter.Marshal(wrapper)
 	utils.CheckError(fmt.Sprintf("persist offset to %s", local.path), utils.WriteToFile(local.path, data))
 }
 

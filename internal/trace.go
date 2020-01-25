@@ -29,9 +29,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/apache/rocketmq-client-go/internal/remote"
-	"github.com/apache/rocketmq-client-go/primitive"
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/internal/remote"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 type TraceBean struct {
@@ -257,7 +257,9 @@ func (td *traceDispatcher) GetTraceTopicName() string {
 func (td *traceDispatcher) Start() {
 	td.running = true
 	td.cli.Start()
-	go td.process()
+	go primitive.WithRecover(func() {
+		td.process()
+	})
 }
 
 func (td *traceDispatcher) Close() {
@@ -299,7 +301,9 @@ func (td *traceDispatcher) process() {
 			batch = append(batch, ctx)
 			if count == batchSize {
 				count = 0
-				go td.batchCommit(batch)
+				go primitive.WithRecover(func() {
+					td.batchCommit(batch)
+				})
 				batch = make([]TraceContext, 0)
 			}
 		case <-td.ticker.C:
@@ -308,12 +312,16 @@ func (td *traceDispatcher) process() {
 				count++
 				lastput = time.Now()
 				if len(batch) > 0 {
-					go td.batchCommit(batch)
+					go primitive.WithRecover(func() {
+						td.batchCommit(batch)
+					})
 					batch = make([]TraceContext, 0)
 				}
 			}
 		case <-td.ctx.Done():
-			go td.batchCommit(batch)
+			go primitive.WithRecover(func() {
+				td.batchCommit(batch)
+			})
 			batch = make([]TraceContext, 0)
 
 			now := time.Now().UnixNano() / int64(time.Millisecond)
@@ -404,7 +412,8 @@ func (td *traceDispatcher) sendTraceDataByMQ(keySet Keyset, regionID string, dat
 	}
 
 	var req = td.buildSendRequest(mq, msg)
-	err := td.cli.InvokeAsync(context.Background(), addr, req, 5*time.Second, func(command *remote.RemotingCommand, e error) {
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	err := td.cli.InvokeAsync(ctx, addr, req, func(command *remote.RemotingCommand, e error) {
 		if e != nil {
 			rlog.Error("send trace data error", map[string]interface{}{
 				"traceData": data,

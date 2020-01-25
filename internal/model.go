@@ -21,12 +21,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/json-iterator/go"
 	"sort"
 	"strings"
 
-	"github.com/apache/rocketmq-client-go/internal/utils"
-	"github.com/apache/rocketmq-client-go/primitive"
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/internal/utils"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 type FindBrokerResult struct {
@@ -95,7 +96,7 @@ func NewHeartbeatData(clientID string) *heartbeatData {
 }
 
 func (data *heartbeatData) encode() []byte {
-	d, err := json.Marshal(data)
+	d, err := jsoniter.Marshal(data)
 	if err != nil {
 		rlog.Error("marshal heartbeatData error", map[string]interface{}{
 			rlog.LogKeyUnderlayError: err,

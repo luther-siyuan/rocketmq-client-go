@@ -19,7 +19,6 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math/rand"
 	"sort"
@@ -29,12 +28,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/json-iterator/go"
 	"github.com/tidwall/gjson"
 
-	"github.com/apache/rocketmq-client-go/internal/remote"
-	"github.com/apache/rocketmq-client-go/internal/utils"
-	"github.com/apache/rocketmq-client-go/primitive"
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/internal/remote"
+	"github.com/apache/rocketmq-client-go/v2/internal/utils"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 const (
@@ -112,8 +112,7 @@ func (info *TopicPublishInfo) fetchQueueIndex() int {
 	return int(qIndex) % length
 }
 
-func (s *namesrvs) UpdateTopicRouteInfo(topic string) *TopicRouteData {
-	// Todo process lock timeout
+func (s *namesrvs) UpdateTopicRouteInfo(topic string) (*TopicRouteData, bool) {
 	s.lockNamesrv.Lock()
 	defer s.lockNamesrv.Unlock()
 
@@ -124,7 +123,7 @@ func (s *namesrvs) UpdateTopicRouteInfo(topic string) *TopicRouteData {
 			rlog.Warning("query topic route from server error", map[string]interface{}{
 				rlog.LogKeyUnderlayError: err,
 			})
-			return nil
+			return nil, false
 		}
 	}
 
@@ -132,10 +131,11 @@ func (s *namesrvs) UpdateTopicRouteInfo(topic string) *TopicRouteData {
 		rlog.Warning("queryTopicRouteInfoFromServer return nil", map[string]interface{}{
 			rlog.LogKeyTopic: topic,
 		})
-		return nil
+		return nil, false
 	}
 
 	oldRouteData, exist := s.routeDataMap.Load(topic)
+
 	changed := true
 	if exist {
 		changed = s.topicRouteDataIsChange(oldRouteData.(*TopicRouteData), routeData)
@@ -153,7 +153,7 @@ func (s *namesrvs) UpdateTopicRouteInfo(topic string) *TopicRouteData {
 		}
 	}
 
-	return routeData.clone()
+	return routeData.clone(), changed
 }
 
 func (s *namesrvs) AddBroker(routeData *TopicRouteData) {
@@ -257,16 +257,6 @@ func (s *namesrvs) FetchSubscribeMessageQueues(topic string) ([]*primitive.Messa
 	return mqs, nil
 }
 
-func (s *namesrvs) FindMQByTopic(topic string) *primitive.MessageQueue {
-	mqs, err := s.FetchPublishMessageQueues(topic)
-	if err != nil {
-		return nil
-	}
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	i := utils.AbsInt(r.Int())
-	return mqs[i%len(mqs)]
-}
-
 func (s *namesrvs) FetchPublishMessageQueues(topic string) ([]*primitive.MessageQueue, error) {
 	var (
 		err       error
@@ -332,7 +322,8 @@ func (s *namesrvs) queryTopicRouteInfoFromServer(topic string) (*TopicRouteData,
 	)
 	for i := 0; i < s.Size(); i++ {
 		rc := remote.NewRemotingCommand(ReqGetRouteInfoByTopic, request, nil)
-		response, err = s.nameSrvClient.InvokeSync(context.Background(), s.getNameServerAddress(), rc, requestTimeout)
+		ctx, _ := context.WithTimeout(context.Background(), requestTimeout)
+		response, err = s.nameSrvClient.InvokeSync(ctx, s.getNameServerAddress(), rc)
 
 		if err == nil {
 			break
@@ -459,7 +450,7 @@ type TopicRouteData struct {
 
 func (routeData *TopicRouteData) decode(data string) error {
 	res := gjson.Parse(data)
-	err := json.Unmarshal([]byte(res.Get("queueDatas").String()), &routeData.QueueDataList)
+	err := jsoniter.Unmarshal([]byte(res.Get("queueDatas").String()), &routeData.QueueDataList)
 
 	if err != nil {
 		return err
@@ -531,7 +522,7 @@ func (routeData *TopicRouteData) equals(data *TopicRouteData) bool {
 }
 
 func (routeData *TopicRouteData) String() string {
-	data, _ := json.Marshal(routeData)
+	data, _ := jsoniter.Marshal(routeData)
 	return string(data)
 }
 

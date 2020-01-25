@@ -24,11 +24,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 var (
 	csListLock sync.Mutex
+	closeOnce  sync.Once
 
 	topicAndGroupConsumeOKTPS     *statsItemSet
 	topicAndGroupConsumeRT        *statsItemSet
@@ -98,11 +100,13 @@ func GetConsumeStatus(group, topic string) ConsumeStatus {
 }
 
 func ShutDownStatis() {
-	topicAndGroupConsumeOKTPS.closed = true
-	topicAndGroupConsumeRT.closed = true
-	topicAndGroupConsumeFailedTPS.closed = true
-	topicAndGroupPullTPS.closed = true
-	topicAndGroupPullRT.closed = true
+	closeOnce.Do(func() {
+		close(topicAndGroupConsumeOKTPS.closed)
+		close(topicAndGroupConsumeRT.closed)
+		close(topicAndGroupConsumeFailedTPS.closed)
+		close(topicAndGroupPullTPS.closed)
+		close(topicAndGroupPullRT.closed)
+	})
 }
 
 func getPullRT(group, topic string) statsSnapshot {
@@ -132,62 +136,100 @@ func getConsumeFailedTPS(group, topic string) statsSnapshot {
 type statsItemSet struct {
 	statsName      string
 	statsItemTable sync.Map
-	closed         bool
+	closed         chan struct{}
 }
 
 func newStatsItemSet(statsName string) *statsItemSet {
 	sis := &statsItemSet{
 		statsName: statsName,
+		closed:    make(chan struct{}),
 	}
 	sis.init()
 	return sis
 }
 
 func (sis *statsItemSet) init() {
-	go func() {
-		for !sis.closed {
-			sis.samplingInSeconds()
-			time.Sleep(10 * time.Second)
-		}
-	}()
+	go primitive.WithRecover(func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sis.closed:
+				return
+			case <-ticker.C:
+				sis.samplingInSeconds()
 
-	go func() {
-		for !sis.closed {
-			sis.samplingInMinutes()
-			time.Sleep(10 * time.Minute)
+			}
 		}
-	}()
+	})
 
-	go func() {
-		for !sis.closed {
-			sis.samplingInHour()
-			time.Sleep(time.Hour)
+	go primitive.WithRecover(func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sis.closed:
+				return
+			case <-ticker.C:
+				sis.samplingInMinutes()
+			}
 		}
-	}()
+	})
 
-	go func() {
+	go primitive.WithRecover(func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sis.closed:
+				return
+			case <-ticker.C:
+				sis.samplingInHour()
+			}
+		}
+	})
+
+	go primitive.WithRecover(func() {
 		time.Sleep(nextMinutesTime().Sub(time.Now()))
-		for !sis.closed {
-			sis.printAtMinutes()
-			time.Sleep(time.Minute)
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sis.closed:
+				return
+			case <-ticker.C:
+				sis.printAtMinutes()
+			}
 		}
-	}()
+	})
 
-	go func() {
+	go primitive.WithRecover(func() {
 		time.Sleep(nextHourTime().Sub(time.Now()))
-		for !sis.closed {
-			sis.printAtHour()
-			time.Sleep(time.Hour)
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sis.closed:
+				return
+			case <-ticker.C:
+				sis.printAtHour()
+			}
 		}
-	}()
+	})
 
-	go func() {
+	go primitive.WithRecover(func() {
 		time.Sleep(nextMonthTime().Sub(time.Now()))
-		for !sis.closed {
-			sis.printAtDay()
-			time.Sleep(24 * time.Hour)
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sis.closed:
+				return
+			case <-ticker.C:
+				sis.printAtDay()
+			}
 		}
-	}()
+	})
 }
 
 func (sis *statsItemSet) samplingInSeconds() {

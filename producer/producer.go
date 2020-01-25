@@ -28,11 +28,11 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/apache/rocketmq-client-go/internal"
-	"github.com/apache/rocketmq-client-go/internal/remote"
-	"github.com/apache/rocketmq-client-go/internal/utils"
-	"github.com/apache/rocketmq-client-go/primitive"
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/internal"
+	"github.com/apache/rocketmq-client-go/v2/internal/remote"
+	"github.com/apache/rocketmq-client-go/v2/internal/utils"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 var (
@@ -87,6 +87,7 @@ func (p *defaultProducer) Start() error {
 
 func (p *defaultProducer) Shutdown() error {
 	atomic.StoreInt32(&p.state, int32(internal.StateShutdown))
+	p.client.UnregisterProducer(p.group)
 	p.client.Shutdown()
 	return nil
 }
@@ -241,7 +242,8 @@ func (p *defaultProducer) sendAsync(ctx context.Context, msg *primitive.Message,
 		return errors.Errorf("topic=%s route info not found", mq.Topic)
 	}
 
-	return p.client.InvokeAsync(ctx, addr, p.buildSendRequest(mq, msg), 3*time.Second, func(command *remote.RemotingCommand, err error) {
+	ctx, _ = context.WithTimeout(ctx, 3*time.Second)
+	return p.client.InvokeAsync(ctx, addr, p.buildSendRequest(mq, msg), func(command *remote.RemotingCommand, err error) {
 		resp := new(primitive.SendResult)
 		if err != nil {
 			h(ctx, nil, err)
@@ -340,7 +342,8 @@ func (p *defaultProducer) selectMessageQueue(msg *primitive.Message) *primitive.
 
 	v, exist := p.publishInfo.Load(topic)
 	if !exist {
-		p.client.UpdatePublishInfo(topic, p.options.Namesrv.UpdateTopicRouteInfo(topic))
+		data, changed := p.options.Namesrv.UpdateTopicRouteInfo(topic)
+		p.client.UpdatePublishInfo(topic, data, changed)
 		v, exist = p.publishInfo.Load(topic)
 	}
 
@@ -408,7 +411,9 @@ func NewTransactionProducer(listener primitive.TransactionListener, opts ...Opti
 }
 
 func (tp *transactionProducer) Start() error {
-	go tp.checkTransactionState()
+	go primitive.WithRecover(func() {
+		tp.checkTransactionState()
+	})
 	return tp.producer.Start()
 }
 func (tp *transactionProducer) Shutdown() error {
@@ -419,7 +424,7 @@ func (tp *transactionProducer) Shutdown() error {
 func (tp *transactionProducer) checkTransactionState() {
 	for ch := range tp.producer.callbackCh {
 		switch callback := ch.(type) {
-		case internal.CheckTransactionStateCallback:
+		case *internal.CheckTransactionStateCallback:
 			localTransactionState := tp.listener.CheckLocalTransaction(callback.Msg)
 			uniqueKey := callback.Msg.GetProperty(primitive.PropertyUniqueClientMessageIdKeyIndex)
 			if uniqueKey == "" {
@@ -440,11 +445,13 @@ func (tp *transactionProducer) checkTransactionState() {
 
 			err := tp.producer.client.InvokeOneWay(context.Background(), callback.Addr.String(), req,
 				tp.producer.options.SendMsgTimeout)
-			rlog.Error("send ReqENDTransaction to broker error", map[string]interface{}{
-				"callback":               callback.Addr.String(),
-				"request":                req.String(),
-				rlog.LogKeyUnderlayError: err,
-			})
+			if err != nil {
+				rlog.Error("send ReqENDTransaction to broker error", map[string]interface{}{
+					"callback":               callback.Addr.String(),
+					"request":                req.String(),
+					rlog.LogKeyUnderlayError: err,
+				})
+			}
 		default:
 			rlog.Error(fmt.Sprintf("unknown type %v", ch), nil)
 		}
@@ -469,7 +476,7 @@ func (tp *transactionProducer) SendMessageInTransaction(ctx context.Context, msg
 		if len(transactionId) > 0 {
 			msg.TransactionId = transactionId
 		}
-		localTransactionState = tp.listener.ExecuteLocalTransaction(*msg)
+		localTransactionState = tp.listener.ExecuteLocalTransaction(msg)
 		if localTransactionState != primitive.CommitMessageState {
 			rlog.Error("executeLocalTransaction but state unexpected", map[string]interface{}{
 				"localState": localTransactionState,

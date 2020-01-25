@@ -24,11 +24,10 @@ import (
 	"io"
 	"net"
 	"sync"
-	"time"
 
-	"github.com/apache/rocketmq-client-go/primitive"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
 
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 type ClientRequestFunc func(*RemotingCommand, net.Addr) *RemotingCommand
@@ -37,13 +36,13 @@ type TcpOption struct {
 	// TODO
 }
 
-//go:generate mockgen -source remote_client.go -destination mock_remote_client.go -self_package github.com/apache/rocketmq-client-go/internal/remote  --package remote RemotingClient
+//go:generate mockgen -source remote_client.go -destination mock_remote_client.go -self_package github.com/apache/rocketmq-client-go/v2/internal/remote  --package remote RemotingClient
 type RemotingClient interface {
 	RegisterRequestFunc(code int16, f ClientRequestFunc)
 	RegisterInterceptor(interceptors ...primitive.Interceptor)
-	InvokeSync(ctx context.Context, addr string, request *RemotingCommand, timeout time.Duration) (*RemotingCommand, error)
-	InvokeAsync(ctx context.Context, addr string, request *RemotingCommand, timeout time.Duration, callback func(*ResponseFuture)) error
-	InvokeOneWay(ctx context.Context, addr string, request *RemotingCommand, timeout time.Duration) error
+	InvokeSync(ctx context.Context, addr string, request *RemotingCommand) (*RemotingCommand, error)
+	InvokeAsync(ctx context.Context, addr string, request *RemotingCommand, callback func(*ResponseFuture)) error
+	InvokeOneWay(ctx context.Context, addr string, request *RemotingCommand) error
 	ShutDown()
 }
 
@@ -69,36 +68,36 @@ func (c *remotingClient) RegisterRequestFunc(code int16, f ClientRequestFunc) {
 }
 
 // TODO: merge sync and async model. sync should run on async model by blocking on chan
-func (c *remotingClient) InvokeSync(ctx context.Context, addr string, request *RemotingCommand, timeout time.Duration) (*RemotingCommand, error) {
+func (c *remotingClient) InvokeSync(ctx context.Context, addr string, request *RemotingCommand) (*RemotingCommand, error) {
 	conn, err := c.connect(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
-	resp := NewResponseFuture(ctx, request.Opaque, timeout, nil)
+	resp := NewResponseFuture(ctx, request.Opaque, nil)
 	c.responseTable.Store(resp.Opaque, resp)
 	defer c.responseTable.Delete(request.Opaque)
 	err = c.sendRequest(conn, request)
 	if err != nil {
 		return nil, err
 	}
-	resp.SendRequestOK = true
 	return resp.waitResponse()
 }
 
 // InvokeAsync send request without blocking, just return immediately.
-func (c *remotingClient) InvokeAsync(ctx context.Context, addr string, request *RemotingCommand, timeout time.Duration, callback func(*ResponseFuture)) error {
+func (c *remotingClient) InvokeAsync(ctx context.Context, addr string, request *RemotingCommand, callback func(*ResponseFuture)) error {
 	conn, err := c.connect(ctx, addr)
 	if err != nil {
 		return err
 	}
-	resp := NewResponseFuture(ctx, request.Opaque, timeout, callback)
+	resp := NewResponseFuture(ctx, request.Opaque, callback)
 	c.responseTable.Store(resp.Opaque, resp)
 	err = c.sendRequest(conn, request)
 	if err != nil {
 		return err
 	}
-	resp.SendRequestOK = true
-	go c.receiveAsync(resp)
+	go primitive.WithRecover(func() {
+		c.receiveAsync(resp)
+	})
 	return nil
 }
 
@@ -109,7 +108,7 @@ func (c *remotingClient) receiveAsync(f *ResponseFuture) {
 	}
 }
 
-func (c *remotingClient) InvokeOneWay(ctx context.Context, addr string, request *RemotingCommand, timeout time.Duration) error {
+func (c *remotingClient) InvokeOneWay(ctx context.Context, addr string, request *RemotingCommand) error {
 	conn, err := c.connect(ctx, addr)
 	if err != nil {
 		return err
@@ -125,20 +124,21 @@ func (c *remotingClient) connect(ctx context.Context, addr string) (*tcpConnWrap
 	if ok {
 		return conn.(*tcpConnWrapper), nil
 	}
-
 	tcpConn, err := initConn(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 	c.connectionTable.Store(addr, tcpConn)
-	go c.receiveResponse(tcpConn)
+	go primitive.WithRecover(func() {
+		c.receiveResponse(tcpConn)
+	})
 	return tcpConn, nil
 }
 
 func (c *remotingClient) receiveResponse(r *tcpConnWrapper) {
 	var err error
-	header := make([]byte, 4)
-	defer c.closeConnection(r)
+	header := primitive.GetHeader()
+	defer primitive.BackHeader(header)
 	for {
 		if err != nil {
 			if r.isClosed(err) {
@@ -171,6 +171,7 @@ func (c *remotingClient) receiveResponse(r *tcpConnWrapper) {
 		}
 
 		buf := make([]byte, length)
+
 		_, err = io.ReadFull(r, buf)
 		if err != nil {
 			if r.isClosed(err) {
@@ -199,20 +200,20 @@ func (c *remotingClient) processCMD(cmd *RemotingCommand, r *tcpConnWrapper) {
 		if exist {
 			c.responseTable.Delete(cmd.Opaque)
 			responseFuture := resp.(*ResponseFuture)
-			go func() {
+			go primitive.WithRecover(func() {
 				responseFuture.ResponseCommand = cmd
 				responseFuture.executeInvokeCallback()
 				if responseFuture.Done != nil {
 					responseFuture.Done <- true
 				}
-			}()
+			})
 		}
 	} else {
 		f := c.processors[cmd.Code]
 		if f != nil {
 			// single goroutine will be deadlock
-			// TODO: optimize with goroutine pool, https://github.com/apache/rocketmq-client-go/issues/307
-			go func() {
+			// TODO: optimize with goroutine pool, https://github.com/apache/rocketmq-client-go/v2/issues/307
+			go primitive.WithRecover(func() {
 				res := f(cmd, r.RemoteAddr())
 				if res != nil {
 					res.Opaque = cmd.Opaque
@@ -225,7 +226,7 @@ func (c *remotingClient) processCMD(cmd *RemotingCommand, r *tcpConnWrapper) {
 						})
 					}
 				}
-			}()
+			})
 		} else {
 			rlog.Warning("receive broker's requests, but no func to handle", map[string]interface{}{
 				"responseCode": cmd.Code,

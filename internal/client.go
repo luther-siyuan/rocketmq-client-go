@@ -28,10 +28,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/rocketmq-client-go/internal/remote"
-	"github.com/apache/rocketmq-client-go/internal/utils"
-	"github.com/apache/rocketmq-client-go/primitive"
-	"github.com/apache/rocketmq-client-go/rlog"
+	"github.com/apache/rocketmq-client-go/v2/internal/remote"
+	"github.com/apache/rocketmq-client-go/v2/internal/utils"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 )
 
 const (
@@ -48,10 +48,10 @@ const (
 	_HeartbeatBrokerInterval = 30 * time.Second
 
 	// Offset persistent interval for consumer
-	_PersistOffset = 5 * time.Second
+	_PersistOffsetInterval = 5 * time.Second
 
 	// Rebalance interval
-	_RebalanceInterval = 10 * time.Second
+	_RebalanceInterval = 20 * time.Second
 )
 
 var (
@@ -123,7 +123,7 @@ func (opt *ClientOptions) String() string {
 		opt.InstanceName, opt.UnitMode, opt.UnitName, opt.VIPChannelEnabled)
 }
 
-//go:generate mockgen -source client.go -destination mock_client.go -self_package github.com/apache/rocketmq-client-go/internal  --package internal RMQClient
+//go:generate mockgen -source client.go -destination mock_client.go -self_package github.com/apache/rocketmq-client-go/v2/internal  --package internal RMQClient
 type RMQClient interface {
 	Start()
 	Shutdown()
@@ -131,10 +131,11 @@ type RMQClient interface {
 	ClientID() string
 
 	RegisterProducer(group string, producer InnerProducer)
+	UnregisterProducer(group string)
 	InvokeSync(ctx context.Context, addr string, request *remote.RemotingCommand,
 		timeoutMillis time.Duration) (*remote.RemotingCommand, error)
 	InvokeAsync(ctx context.Context, addr string, request *remote.RemotingCommand,
-		timeoutMillis time.Duration, f func(*remote.RemotingCommand, error)) error
+		f func(*remote.RemotingCommand, error)) error
 	InvokeOneWay(ctx context.Context, addr string, request *remote.RemotingCommand,
 		timeoutMillis time.Duration) error
 	CheckClientInBroker()
@@ -146,9 +147,8 @@ type RMQClient interface {
 	RegisterConsumer(group string, consumer InnerConsumer) error
 	UnregisterConsumer(group string)
 	PullMessage(ctx context.Context, brokerAddrs string, request *PullMessageRequestHeader) (*primitive.PullResult, error)
-	PullMessageAsync(ctx context.Context, brokerAddrs string, request *PullMessageRequestHeader, f func(result *primitive.PullResult)) error
 	RebalanceImmediately()
-	UpdatePublishInfo(topic string, data *TopicRouteData)
+	UpdatePublishInfo(topic string, data *TopicRouteData, changed bool)
 }
 
 var _ RMQClient = new(rmqClient)
@@ -212,9 +212,9 @@ func GetOrNewRocketMQClient(option ClientOptions, callbackCh chan interface{}) R
 				rlog.Warning("producer group is not equal", nil)
 				return nil
 			}
-			callback := CheckTransactionStateCallback{
+			callback := &CheckTransactionStateCallback{
 				Addr:   addr,
-				Msg:    *msgExt,
+				Msg:    msgExt,
 				Header: *header,
 			}
 			callbackCh <- callback
@@ -282,7 +282,7 @@ func (c *rmqClient) Start() {
 		}
 
 		// schedule update route info
-		go func() {
+		go primitive.WithRecover(func() {
 			// delay
 			ticker := time.NewTicker(_PullNameServerInterval)
 			defer ticker.Stop()
@@ -298,10 +298,9 @@ func (c *rmqClient) Start() {
 					return
 				}
 			}
-		}()
+		})
 
-		// TODO cleanOfflineBroker & sendHeartbeatToAllBrokerWithLock
-		go func() {
+		go primitive.WithRecover(func() {
 			ticker := time.NewTicker(_HeartbeatBrokerInterval)
 			defer ticker.Stop()
 			for {
@@ -316,11 +315,11 @@ func (c *rmqClient) Start() {
 					return
 				}
 			}
-		}()
+		})
 
 		// schedule persist offset
-		go func() {
-			ticker := time.NewTicker(_PersistOffset)
+		go primitive.WithRecover(func() {
+			ticker := time.NewTicker(_PersistOffsetInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -342,9 +341,9 @@ func (c *rmqClient) Start() {
 					return
 				}
 			}
-		}()
+		})
 
-		go func() {
+		go primitive.WithRecover(func() {
 			ticker := time.NewTicker(_RebalanceInterval)
 			defer ticker.Stop()
 			for {
@@ -358,7 +357,7 @@ func (c *rmqClient) Start() {
 					return
 				}
 			}
-		}()
+		})
 	})
 }
 
@@ -383,15 +382,16 @@ func (c *rmqClient) InvokeSync(ctx context.Context, addr string, request *remote
 	if c.close {
 		return nil, ErrServiceState
 	}
-	return c.remoteClient.InvokeSync(ctx, addr, request, timeoutMillis)
+	ctx, _ = context.WithTimeout(ctx, timeoutMillis)
+	return c.remoteClient.InvokeSync(ctx, addr, request)
 }
 
 func (c *rmqClient) InvokeAsync(ctx context.Context, addr string, request *remote.RemotingCommand,
-	timeoutMillis time.Duration, f func(*remote.RemotingCommand, error)) error {
+	f func(*remote.RemotingCommand, error)) error {
 	if c.close {
 		return ErrServiceState
 	}
-	return c.remoteClient.InvokeAsync(ctx, addr, request, timeoutMillis, func(future *remote.ResponseFuture) {
+	return c.remoteClient.InvokeAsync(ctx, addr, request, func(future *remote.ResponseFuture) {
 		f(future.ResponseCommand, future.Err)
 	})
 
@@ -402,7 +402,7 @@ func (c *rmqClient) InvokeOneWay(ctx context.Context, addr string, request *remo
 	if c.close {
 		return ErrServiceState
 	}
-	return c.remoteClient.InvokeOneWay(ctx, addr, request, timeoutMillis)
+	return c.remoteClient.InvokeOneWay(ctx, addr, request)
 }
 
 func (c *rmqClient) CheckClientInBroker() {
@@ -444,7 +444,9 @@ func (c *rmqClient) SendHeartbeatToAllBrokerWithLock() {
 		data := value.(*BrokerData)
 		for id, addr := range data.BrokerAddresses {
 			cmd := remote.NewRemotingCommand(ReqHeartBeat, nil, hbData.encode())
-			response, err := c.remoteClient.InvokeSync(context.Background(), addr, cmd, 3*time.Second)
+
+			ctx, _ := context.WithTimeout(context.Background(), 3*time.Second)
+			response, err := c.remoteClient.InvokeSync(ctx, addr, cmd)
 			if err != nil {
 				rlog.Warning("send heart beat to broker error", map[string]interface{}{
 					rlog.LogKeyUnderlayError: err,
@@ -475,7 +477,8 @@ func (c *rmqClient) UpdateTopicRouteInfo() {
 		return true
 	})
 	for topic := range publishTopicSet {
-		c.UpdatePublishInfo(topic, c.namesrvs.UpdateTopicRouteInfo(topic))
+		data, changed := c.namesrvs.UpdateTopicRouteInfo(topic)
+		c.UpdatePublishInfo(topic, data, changed)
 	}
 
 	subscribedTopicSet := make(map[string]bool, 0)
@@ -489,7 +492,8 @@ func (c *rmqClient) UpdateTopicRouteInfo() {
 	})
 
 	for topic := range subscribedTopicSet {
-		c.updateSubscribeInfo(topic, c.namesrvs.UpdateTopicRouteInfo(topic))
+		data, changed := c.namesrvs.UpdateTopicRouteInfo(topic)
+		c.updateSubscribeInfo(topic, data, changed)
 	}
 }
 
@@ -542,7 +546,8 @@ func (c *rmqClient) ProcessSendResponse(brokerName string, cmd *remote.RemotingC
 // PullMessage with sync
 func (c *rmqClient) PullMessage(ctx context.Context, brokerAddrs string, request *PullMessageRequestHeader) (*primitive.PullResult, error) {
 	cmd := remote.NewRemotingCommand(ReqPullMessage, request, nil)
-	res, err := c.remoteClient.InvokeSync(ctx, brokerAddrs, cmd, 10*time.Second)
+	ctx, _ = context.WithTimeout(ctx, 30*time.Second)
+	res, err := c.remoteClient.InvokeSync(ctx, brokerAddrs, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -594,11 +599,6 @@ func (c *rmqClient) decodeCommandCustomHeader(pr *primitive.PullResult, cmd *rem
 	}
 }
 
-// PullMessageAsync pull message async
-func (c *rmqClient) PullMessageAsync(ctx context.Context, brokerAddrs string, request *PullMessageRequestHeader, f func(result *primitive.PullResult)) error {
-	return nil
-}
-
 func (c *rmqClient) RegisterConsumer(group string, consumer InnerConsumer) error {
 	_, exist := c.consumerMap.Load(group)
 	if exist {
@@ -612,6 +612,7 @@ func (c *rmqClient) RegisterConsumer(group string, consumer InnerConsumer) error
 }
 
 func (c *rmqClient) UnregisterConsumer(group string) {
+	c.consumerMap.Delete(group)
 }
 
 func (c *rmqClient) RegisterProducer(group string, producer InnerProducer) {
@@ -619,14 +620,7 @@ func (c *rmqClient) RegisterProducer(group string, producer InnerProducer) {
 }
 
 func (c *rmqClient) UnregisterProducer(group string) {
-}
-
-func (c *rmqClient) SelectProducer(group string) InnerProducer {
-	return nil
-}
-
-func (c *rmqClient) SelectConsumer(group string) InnerConsumer {
-	return nil
+	c.producerMap.Delete(group)
 }
 
 func (c *rmqClient) RebalanceImmediately() {
@@ -639,36 +633,27 @@ func (c *rmqClient) RebalanceImmediately() {
 	})
 }
 
-func (c *rmqClient) UpdatePublishInfo(topic string, data *TopicRouteData) {
+func (c *rmqClient) UpdatePublishInfo(topic string, data *TopicRouteData, changed bool) {
 	if data == nil {
 		return
 	}
-	if !c.isNeedUpdatePublishInfo(topic) {
-		return
-	}
-	c.producerMap.Range(func(key, value interface{}) bool {
-		p := value.(InnerProducer)
-		publishInfo := c.namesrvs.routeData2PublishInfo(topic, data)
-		publishInfo.HaveTopicRouterInfo = true
-		p.UpdateTopicPublishInfo(topic, publishInfo)
-		return true
-	})
-}
 
-func (c *rmqClient) isNeedUpdatePublishInfo(topic string) bool {
-	var result bool
 	c.producerMap.Range(func(key, value interface{}) bool {
 		p := value.(InnerProducer)
-		if p.IsPublishTopicNeedUpdate(topic) {
-			result = true
-			return false
+		updated := changed
+		if !updated {
+			updated = p.IsPublishTopicNeedUpdate(topic)
+		}
+		if updated {
+			publishInfo := c.namesrvs.routeData2PublishInfo(topic, data)
+			publishInfo.HaveTopicRouterInfo = true
+			p.UpdateTopicPublishInfo(topic, publishInfo)
 		}
 		return true
 	})
-	return result
 }
 
-func (c *rmqClient) updateSubscribeInfo(topic string, data *TopicRouteData) {
+func (c *rmqClient) updateSubscribeInfo(topic string, data *TopicRouteData, changed bool) {
 	if data == nil {
 		return
 	}
@@ -677,8 +662,14 @@ func (c *rmqClient) updateSubscribeInfo(topic string, data *TopicRouteData) {
 	}
 	c.consumerMap.Range(func(key, value interface{}) bool {
 		consumer := value.(InnerConsumer)
-		// TODO
-		consumer.UpdateTopicSubscribeInfo(topic, routeData2SubscribeInfo(topic, data))
+		updated := changed
+		if !updated {
+			updated = consumer.IsSubscribeTopicNeedUpdate(topic)
+		}
+		if updated {
+			consumer.UpdateTopicSubscribeInfo(topic, routeData2SubscribeInfo(topic, data))
+		}
+
 		return true
 	})
 }
