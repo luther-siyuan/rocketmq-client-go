@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -163,9 +164,6 @@ func (pc *pushConsumer) Start() error {
 			}
 		}()
 
-		pc.Rebalance()
-		time.Sleep(1 * time.Second)
-
 		go primitive.WithRecover(func() {
 			// initial lock.
 			if !pc.consumeOrderly {
@@ -203,9 +201,9 @@ func (pc *pushConsumer) Start() error {
 			return fmt.Errorf("the topic=%s route info not found, it may not exist", k)
 		}
 	}
-	pc.client.RebalanceImmediately()
 	pc.client.CheckClientInBroker()
 	pc.client.SendHeartbeatToAllBrokerWithLock()
+	pc.client.RebalanceImmediately()
 
 	return err
 }
@@ -233,14 +231,6 @@ func (pc *pushConsumer) Subscribe(topic string, selector MessageSelector,
 	data := buildSubscriptionData(topic, selector)
 	pc.subscriptionDataTable.Store(topic, data)
 	pc.subscribedTopic[topic] = ""
-
-	if pc.option.ConsumerModel == Clustering {
-		// add retry topic for clustering mode
-		retryTopic := internal.GetRetryTopic(pc.consumerGroup)
-		retryData := buildSubscriptionData(retryTopic, MessageSelector{Expression: _SubAll})
-		pc.subscriptionDataTable.Store(retryTopic, retryData)
-		pc.subscribedTopic[retryTopic] = ""
-	}
 
 	pc.consumeFunc.Add(&PushConsumerCallback{
 		f:     f,
@@ -690,13 +680,11 @@ func (pc *pushConsumer) pullMessage(request *PullRequest) {
 			})
 			request.nextOffset = result.NextBeginOffset
 			pq.WithDropped(true)
-			go primitive.WithRecover(func() {
-				time.Sleep(10 * time.Second)
-				pc.storage.update(request.mq, request.nextOffset, false)
-				pc.storage.persist([]*primitive.MessageQueue{request.mq})
-				pc.storage.remove(request.mq)
-				rlog.Warning(fmt.Sprintf("fix the pull request offset: %s", request.String()), nil)
-			})
+			time.Sleep(10 * time.Second)
+			pc.storage.update(request.mq, request.nextOffset, false)
+			pc.storage.persist([]*primitive.MessageQueue{request.mq})
+			pc.processQueueTable.Delete(request.mq)
+			rlog.Warning(fmt.Sprintf("fix the pull request offset: %s", request.String()), nil)
 		default:
 			rlog.Warning(fmt.Sprintf("unknown pull status: %v", result.Status), nil)
 			sleepTime = _PullDelayTimeWhenError
@@ -816,6 +804,12 @@ func (pc *pushConsumer) consumeInner(ctx context.Context, subMsgs []*primitive.M
 	}
 
 	f, exist := pc.consumeFunc.Contains(subMsgs[0].Topic)
+
+	// fix lost retry message
+	if !exist && strings.HasPrefix(subMsgs[0].Topic, internal.RetryGroupTopicPrefix) {
+		f, exist = pc.consumeFunc.Contains(subMsgs[0].GetProperty(primitive.PropertyRetryTopic))
+	}
+
 	if !exist {
 		return ConsumeRetryLater, fmt.Errorf("the consume callback missing for topic: %s", subMsgs[0].Topic)
 	}
@@ -837,6 +831,11 @@ func (pc *pushConsumer) consumeInner(ctx context.Context, subMsgs []*primitive.M
 
 			msgCtx, _ := primitive.GetConsumerCtx(ctx)
 			msgCtx.Success = realReply.ConsumeResult == ConsumeSuccess
+			if realReply.ConsumeResult == ConsumeSuccess {
+				msgCtx.Properties[primitive.PropCtxType] = string(primitive.SuccessReturn)
+			} else {
+				msgCtx.Properties[primitive.PropCtxType] = string(primitive.FailedReturn)
+			}
 			return e
 		})
 		return container.ConsumeResult, err

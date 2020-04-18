@@ -28,7 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/json-iterator/go"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/tidwall/gjson"
 
 	"github.com/apache/rocketmq-client-go/v2/internal/remote"
@@ -112,26 +112,45 @@ func (info *TopicPublishInfo) fetchQueueIndex() int {
 	return int(qIndex) % length
 }
 
-func (s *namesrvs) UpdateTopicRouteInfo(topic string) (*TopicRouteData, bool) {
+func (s *namesrvs) UpdateTopicRouteInfo(topic string) (*TopicRouteData, bool, error) {
+	return s.UpdateTopicRouteInfoWithDefault(topic, "", 0)
+}
+
+func (s *namesrvs) UpdateTopicRouteInfoWithDefault(topic string, defaultTopic string, defaultQueueNum int) (*TopicRouteData, bool, error) {
 	s.lockNamesrv.Lock()
 	defer s.lockNamesrv.Unlock()
 
-	routeData, err := s.queryTopicRouteInfoFromServer(topic)
+	var (
+		routeData *TopicRouteData
+		err       error
+	)
+
+	t := topic
+	if len(defaultTopic) > 0 {
+		t = defaultTopic
+	}
+	routeData, err = s.queryTopicRouteInfoFromServer(t)
+
 	if err != nil {
-		routeData, err = s.queryTopicRouteInfoFromServer(defaultTopic)
-		if err != nil {
-			rlog.Warning("query topic route from server error", map[string]interface{}{
-				rlog.LogKeyUnderlayError: err,
-			})
-			return nil, false
-		}
+		rlog.Warning("query topic route from server error", map[string]interface{}{
+			rlog.LogKeyUnderlayError: err,
+		})
 	}
 
 	if routeData == nil {
 		rlog.Warning("queryTopicRouteInfoFromServer return nil", map[string]interface{}{
 			rlog.LogKeyTopic: topic,
 		})
-		return nil, false
+		return nil, false, err
+	}
+
+	if len(defaultTopic) > 0 {
+		for _, q := range routeData.QueueDataList {
+			if q.ReadQueueNums > defaultQueueNum {
+				q.ReadQueueNums = defaultQueueNum
+				q.WriteQueueNums = defaultQueueNum
+			}
+		}
 	}
 
 	oldRouteData, exist := s.routeDataMap.Load(topic)
@@ -153,7 +172,7 @@ func (s *namesrvs) UpdateTopicRouteInfo(topic string) (*TopicRouteData, bool) {
 		}
 	}
 
-	return routeData.clone(), changed
+	return routeData.clone(), changed, nil
 }
 
 func (s *namesrvs) AddBroker(routeData *TopicRouteData) {
@@ -320,6 +339,16 @@ func (s *namesrvs) queryTopicRouteInfoFromServer(topic string) (*TopicRouteData,
 		response *remote.RemotingCommand
 		err      error
 	)
+
+	//if s.Size() == 0, response will be nil, lead to panic below.
+	if s.Size() == 0 {
+		rlog.Error("namesrv list empty. UpdateNameServerAddress should be called first.", map[string]interface{}{
+			"namesrv": s,
+			"topic":   topic,
+		})
+		return nil, primitive.NewRemotingErr("namesrv list empty")
+	}
+
 	for i := 0; i < s.Size(); i++ {
 		rc := remote.NewRemotingCommand(ReqGetRouteInfoByTopic, request, nil)
 		ctx, _ := context.WithTimeout(context.Background(), requestTimeout)
@@ -332,14 +361,15 @@ func (s *namesrvs) queryTopicRouteInfoFromServer(topic string) (*TopicRouteData,
 	if err != nil {
 		rlog.Error("connect to namesrv failed.", map[string]interface{}{
 			"namesrv": s,
+			"topic":   topic,
 		})
-		return nil, err
+		return nil, primitive.NewRemotingErr(err.Error())
 	}
 
 	switch response.Code {
 	case ResSuccess:
 		if response.Body == nil {
-			return nil, errors.New(response.Remark)
+			return nil, primitive.NewMQClientErr(response.Code, response.Remark)
 		}
 		routeData := &TopicRouteData{}
 
@@ -347,6 +377,7 @@ func (s *namesrvs) queryTopicRouteInfoFromServer(topic string) (*TopicRouteData,
 		if err != nil {
 			rlog.Warning("decode TopicRouteData error: %s", map[string]interface{}{
 				rlog.LogKeyUnderlayError: err,
+				"topic":                  topic,
 			})
 			return nil, err
 		}
@@ -354,7 +385,7 @@ func (s *namesrvs) queryTopicRouteInfoFromServer(topic string) (*TopicRouteData,
 	case ResTopicNotExist:
 		return nil, ErrTopicNotExist
 	default:
-		return nil, errors.New(response.Remark)
+		return nil, primitive.NewMQClientErr(response.Code, response.Remark)
 	}
 }
 
@@ -573,6 +604,10 @@ func (b *BrokerData) Equals(bd *BrokerData) bool {
 	}
 
 	if b.BrokerName != bd.BrokerName {
+		return false
+	}
+
+	if len(b.BrokerAddresses) != len(bd.BrokerAddresses) {
 		return false
 	}
 

@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	clientVersion        = "v2.0.0-alpha3"
+	clientVersion        = "v2.0.0"
 	defaultTraceRegionID = "DefaultRegion"
 
 	// tracing message switch
@@ -262,15 +262,20 @@ func (c *rmqClient) Start() {
 		}
 		// fetchNameServerAddr
 		if len(c.option.NameServerAddrs) == 0 {
-			go func() {
-				// delay
-				ticker := time.NewTicker(60 * 2 * time.Second)
+			c.namesrvs.UpdateNameServerAddress(c.option.NameServerDomain, c.option.InstanceName)
+			go primitive.WithRecover(func() {
+				op := func() {
+					c.namesrvs.UpdateNameServerAddress(c.option.NameServerDomain, c.option.InstanceName)
+				}
+				time.Sleep(10 * time.Second)
+				op()
+
+				ticker := time.NewTicker(2 * time.Minute)
 				defer ticker.Stop()
-				time.Sleep(50 * time.Millisecond)
 				for {
 					select {
 					case <-ticker.C:
-						c.namesrvs.UpdateNameServerAddress(c.option.NameServerDomain, c.option.InstanceName)
+						op()
 					case <-c.done:
 						rlog.Info("The RMQClient stopping update name server domain info.", map[string]interface{}{
 							"clientID": c.ClientID(),
@@ -278,19 +283,24 @@ func (c *rmqClient) Start() {
 						return
 					}
 				}
-			}()
+			})
 		}
 
 		// schedule update route info
 		go primitive.WithRecover(func() {
 			// delay
+			op := func() {
+				c.UpdateTopicRouteInfo()
+			}
+			time.Sleep(10 * time.Millisecond)
+			op()
+
 			ticker := time.NewTicker(_PullNameServerInterval)
 			defer ticker.Stop()
-			time.Sleep(50 * time.Millisecond)
 			for {
 				select {
 				case <-ticker.C:
-					c.UpdateTopicRouteInfo()
+					op()
 				case <-c.done:
 					rlog.Info("The RMQClient stopping update topic route info.", map[string]interface{}{
 						"clientID": c.ClientID(),
@@ -301,13 +311,20 @@ func (c *rmqClient) Start() {
 		})
 
 		go primitive.WithRecover(func() {
+			op := func() {
+				c.namesrvs.cleanOfflineBroker()
+				c.SendHeartbeatToAllBrokerWithLock()
+			}
+
+			time.Sleep(time.Second)
+			op()
+
 			ticker := time.NewTicker(_HeartbeatBrokerInterval)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					c.namesrvs.cleanOfflineBroker()
-					c.SendHeartbeatToAllBrokerWithLock()
+					op()
 				case <-c.done:
 					rlog.Info("The RMQClient stopping clean off line broker and heart beat", map[string]interface{}{
 						"clientID": c.ClientID(),
@@ -319,21 +336,27 @@ func (c *rmqClient) Start() {
 
 		// schedule persist offset
 		go primitive.WithRecover(func() {
+			op := func() {
+				c.consumerMap.Range(func(key, value interface{}) bool {
+					consumer := value.(InnerConsumer)
+					err := consumer.PersistConsumerOffset()
+					if err != nil {
+						rlog.Error("persist offset failed", map[string]interface{}{
+							rlog.LogKeyUnderlayError: err,
+						})
+					}
+					return true
+				})
+			}
+			time.Sleep(10 * time.Second)
+			op()
+
 			ticker := time.NewTicker(_PersistOffsetInterval)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					c.consumerMap.Range(func(key, value interface{}) bool {
-						consumer := value.(InnerConsumer)
-						err := consumer.PersistConsumerOffset()
-						if err != nil {
-							rlog.Error("persist offset failed", map[string]interface{}{
-								rlog.LogKeyUnderlayError: err,
-							})
-						}
-						return true
-					})
+					op()
 				case <-c.done:
 					rlog.Info("The RMQClient stopping persist offset", map[string]interface{}{
 						"clientID": c.ClientID(),
@@ -370,7 +393,12 @@ func (c *rmqClient) Shutdown() {
 }
 
 func (c *rmqClient) ClientID() string {
-	id := c.option.ClientIP + "@" + c.option.InstanceName
+	id := c.option.ClientIP + "@"
+	if c.option.InstanceName == "DEFAULT" {
+		id += strconv.Itoa(os.Getpid())
+	} else {
+		id += c.option.InstanceName
+	}
 	if c.option.UnitName != "" {
 		id += "@" + c.option.UnitName
 	}
@@ -426,7 +454,7 @@ func (c *rmqClient) SendHeartbeatToAllBrokerWithLock() {
 		consumer := value.(InnerConsumer)
 		cData := consumerData{
 			GroupName:         key.(string),
-			CType:             "PUSH",
+			CType:             "CONSUME_PASSIVELY",
 			MessageModel:      "CLUSTERING",
 			Where:             "CONSUME_FROM_FIRST_OFFSET",
 			UnitMode:          consumer.IsUnitMode(),
@@ -443,6 +471,19 @@ func (c *rmqClient) SendHeartbeatToAllBrokerWithLock() {
 		brokerName := key.(string)
 		data := value.(*BrokerData)
 		for id, addr := range data.BrokerAddresses {
+			rlog.Debug("try to send heart beat to broker", map[string]interface{}{
+				"brokerName": brokerName,
+				"brokerId":   id,
+				"brokerAddr": addr,
+			})
+			if hbData.ConsumerDatas.Len() == 0 && id != 0 {
+				rlog.Debug("notice, will not send heart beat to broker", map[string]interface{}{
+					"brokerName": brokerName,
+					"brokerId":   id,
+					"brokerAddr": addr,
+				})
+				continue
+			}
 			cmd := remote.NewRemotingCommand(ReqHeartBeat, nil, hbData.encode())
 
 			ctx, _ := context.WithTimeout(context.Background(), 3*time.Second)
@@ -459,6 +500,13 @@ func (c *rmqClient) SendHeartbeatToAllBrokerWithLock() {
 					"brokerName": brokerName,
 					"brokerId":   id,
 					"brokerAddr": addr,
+				})
+			} else {
+				rlog.Warning("send heart beat to broker failed", map[string]interface{}{
+					"brokerName":   brokerName,
+					"brokerId":     id,
+					"brokerAddr":   addr,
+					"responseCode": response.Code,
 				})
 			}
 		}
@@ -477,7 +525,7 @@ func (c *rmqClient) UpdateTopicRouteInfo() {
 		return true
 	})
 	for topic := range publishTopicSet {
-		data, changed := c.namesrvs.UpdateTopicRouteInfo(topic)
+		data, changed, _ := c.namesrvs.UpdateTopicRouteInfo(topic)
 		c.UpdatePublishInfo(topic, data, changed)
 	}
 
@@ -492,7 +540,7 @@ func (c *rmqClient) UpdateTopicRouteInfo() {
 	})
 
 	for topic := range subscribedTopicSet {
-		data, changed := c.namesrvs.UpdateTopicRouteInfo(topic)
+		data, changed, _ := c.namesrvs.UpdateTopicRouteInfo(topic)
 		c.updateSubscribeInfo(topic, data, changed)
 	}
 }
@@ -517,6 +565,7 @@ func (c *rmqClient) ProcessSendResponse(brokerName string, cmd *remote.RemotingC
 	for i := 0; i < len(msgs); i++ {
 		msgIDs = append(msgIDs, msgs[i].GetProperty(primitive.PropertyUniqueClientMessageIdKeyIndex))
 	}
+	uniqueMsgId := strings.Join(msgIDs, ",")
 
 	regionId := cmd.ExtFields[primitive.PropertyMsgRegion]
 	trace := cmd.ExtFields[primitive.PropertyTraceSwitch]
@@ -529,7 +578,7 @@ func (c *rmqClient) ProcessSendResponse(brokerName string, cmd *remote.RemotingC
 	off, _ := strconv.ParseInt(cmd.ExtFields["queueOffset"], 10, 64)
 
 	resp.Status = status
-	resp.MsgID = cmd.ExtFields["msgId"]
+	resp.MsgID = uniqueMsgId
 	resp.OffsetMsgID = cmd.ExtFields["msgId"]
 	resp.MessageQueue = &primitive.MessageQueue{
 		Topic:      msgs[0].Topic,
@@ -537,7 +586,7 @@ func (c *rmqClient) ProcessSendResponse(brokerName string, cmd *remote.RemotingC
 		QueueId:    qId,
 	}
 	resp.QueueOffset = off
-	//TransactionID: sendResponse.TransactionId,
+	resp.TransactionID = cmd.ExtFields["transactionId"]
 	resp.RegionID = regionId
 	resp.TraceOn = trace != "" && trace != _TranceOff
 	return nil
@@ -655,9 +704,6 @@ func (c *rmqClient) UpdatePublishInfo(topic string, data *TopicRouteData, change
 
 func (c *rmqClient) updateSubscribeInfo(topic string, data *TopicRouteData, changed bool) {
 	if data == nil {
-		return
-	}
-	if !c.isNeedUpdateSubscribeInfo(topic) {
 		return
 	}
 	c.consumerMap.Range(func(key, value interface{}) bool {
